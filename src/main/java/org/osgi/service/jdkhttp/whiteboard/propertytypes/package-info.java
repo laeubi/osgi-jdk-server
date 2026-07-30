@@ -16,25 +16,23 @@
  * SPDX-License-Identifier: Apache-2.0 
  *******************************************************************************/
 
-package org.osgi.service.jdkhttp.runtime.dto;
-
 /**
- * Represents a {@code com.sun.net.httpserver.Authenticator} service which is
- * currently not being used due to a problem.
+ * JDK HttpServer Whiteboard Property Types Package Version 1.0.
+ * <p>
+ * When used as annotations, component property types are processed by tools
+ * to generate Component Descriptions which are used at runtime.
+ * <p>
+ * Bundles wishing to use this package at runtime must list the package in
+ * the Import-Package header of the bundle's manifest.
+ * <p>
+ * Example import for consumers using the API in this package:
+ * <p>
+ * {@code  Import-Package: org.osgi.service.jdkhttp.whiteboard.propertytypes; version="[1.0,2.0)"}
  *
- * @NotThreadSafe
  * @author $Id$
  */
-public class FailedAuthenticatorDTO extends AuthenticatorDTO {
+@Version(JdkHttpWhiteboardConstants.JDK_HTTP_WHITEBOARD_SPECIFICATION_VERSION + ".0")
+package org.osgi.service.jdkhttp.whiteboard.propertytypes;
 
-	/**
-	 * The reason why the authenticator represented by this DTO is not used.
-	 *
-	 * @see DTOConstants#FAILURE_REASON_UNKNOWN
-	 * @see DTOConstants#FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE
-	 * @see DTOConstants#FAILURE_REASON_EXCEPTION_ON_INIT
-	 * @see DTOConstants#FAILURE_REASON_SERVICE_NOT_GETTABLE
-	 * @see DTOConstants#FAILURE_REASON_VALIDATION_FAILED
-	 */
-	public int	failureReason;
-}
+import org.osgi.annotation.versioning.Version;
+import org.osgi.service.jdkhttp.whiteboard.JdkHttpWhiteboardConstants;

@@ -2,6 +2,7 @@ package org.laeubi.osgi.jdkhttp.impl;
 
 import org.osgi.service.jdkhttp.runtime.JdkHttpServerRuntime;
 import org.osgi.service.jdkhttp.runtime.dto.JdkHttpServerRuntimeDTO;
+import org.osgi.service.jdkhttp.runtime.dto.RequestInfoDTO;
 
 /**
  * Implementation of {@link JdkHttpServerRuntime} that delegates to
@@ -23,9 +24,17 @@ class JdkHttpServerRuntimeImpl implements JdkHttpServerRuntime {
         dto.handlers             = whiteboard.getHandlerDTOs();
         dto.filters              = whiteboard.getFilterDTOs();
         dto.authenticators       = whiteboard.getAuthenticatorDTOs();
+        dto.resources            = whiteboard.getResourceDTOs();
         dto.failedHandlers       = whiteboard.getFailedHandlerDTOs();
         dto.failedFilters        = whiteboard.getFailedFilterDTOs();
         dto.failedAuthenticators = whiteboard.getFailedAuthenticatorDTOs();
+        dto.failedResources      = whiteboard.getFailedResourceDTOs();
         return dto;
     }
+
+    @Override
+    public RequestInfoDTO calculateRequestInfoDTO(String path) {
+        return whiteboard.calculateRequestInfoDTO(path);
+    }
 }
+

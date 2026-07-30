@@ -5,23 +5,34 @@ import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.Constants;
+import org.osgi.framework.InvalidSyntaxException;
 import org.osgi.framework.ServiceReference;
 import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.jdkhttp.runtime.JdkHttpServerRuntime;
+import org.osgi.service.jdkhttp.runtime.JdkHttpServerRuntimeConstants;
 import org.osgi.service.jdkhttp.runtime.dto.AuthenticatorDTO;
+import org.osgi.service.jdkhttp.runtime.dto.DTOConstants;
 import org.osgi.service.jdkhttp.runtime.dto.FailedAuthenticatorDTO;
 import org.osgi.service.jdkhttp.runtime.dto.FailedFilterDTO;
 import org.osgi.service.jdkhttp.runtime.dto.FailedHandlerDTO;
+import org.osgi.service.jdkhttp.runtime.dto.FailedResourceDTO;
 import org.osgi.service.jdkhttp.runtime.dto.FilterDTO;
 import org.osgi.service.jdkhttp.runtime.dto.HandlerDTO;
+import org.osgi.service.jdkhttp.runtime.dto.RequestInfoDTO;
+import org.osgi.service.jdkhttp.runtime.dto.ResourceDTO;
 import org.osgi.service.jdkhttp.whiteboard.JdkHttpWhiteboardConstants;
 import org.osgi.util.tracker.ServiceTracker;
 import org.osgi.util.tracker.ServiceTrackerCustomizer;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLConnection;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -69,6 +80,7 @@ public class JdkHttpServerWhiteboard {
     private ServiceTracker<HttpHandler, ServiceReference<HttpHandler>> handlerTracker;
     private ServiceTracker<Filter, ServiceReference<Filter>> filterTracker;
     private ServiceTracker<Authenticator, ServiceReference<Authenticator>> authenticatorTracker;
+    private ServiceTracker<Object, ServiceReference<Object>> resourceTracker;
     private volatile ServiceRegistration<JdkHttpServerRuntime> runtimeRegistration;
 
     // -----------------------------------------------------------------------
@@ -115,6 +127,22 @@ public class JdkHttpServerWhiteboard {
     private final Map<ServiceReference<Authenticator>, FailedAuthenticatorDTO> refToFailedAuthDTO = new HashMap<>();
 
     // -----------------------------------------------------------------------
+    // Resource state  (guarded by resourceLock; context path bookkeeping is
+    // shared with handlers and guarded by handlerLock)
+    // -----------------------------------------------------------------------
+
+    private final Object resourceLock = new Object();
+
+    /** context path → the resource ref currently bound to it. */
+    private final Map<String, ServiceReference<Object>> resourcePathToRef = new HashMap<>();
+    /** serviceRef → the HttpContexts created for its patterns. */
+    private final Map<ServiceReference<Object>, List<HttpContext>> refToResourceContexts = new HashMap<>();
+    /** serviceRef → ResourceDTO. */
+    private final Map<ServiceReference<Object>, ResourceDTO> refToResourceDTO = new HashMap<>();
+    /** serviceRef → FailedResourceDTO. */
+    private final Map<ServiceReference<Object>, FailedResourceDTO> refToFailedResourceDTO = new HashMap<>();
+
+    // -----------------------------------------------------------------------
     // Construction
     // -----------------------------------------------------------------------
 
@@ -152,6 +180,14 @@ public class JdkHttpServerWhiteboard {
         handlerTracker = new ServiceTracker<>(context, HttpHandler.class, handlerCustomizer());
         filterTracker  = new ServiceTracker<>(context, Filter.class, filterCustomizer());
         authenticatorTracker = new ServiceTracker<>(context, Authenticator.class, authCustomizer());
+        try {
+            org.osgi.framework.Filter resourceFilter = context.createFilter(
+                    "(" + JdkHttpWhiteboardConstants.JDK_HTTP_RESOURCE_PATTERN + "=*)");
+            resourceTracker = new ServiceTracker<>(context, resourceFilter, resourceCustomizer());
+        } catch (InvalidSyntaxException e) {
+            // JDK_HTTP_RESOURCE_PATTERN is a constant; the filter is always valid.
+            throw new IllegalStateException(e);
+        }
 
         httpServer.start();
 
@@ -159,7 +195,7 @@ public class JdkHttpServerWhiteboard {
         InetSocketAddress bound = (InetSocketAddress) httpServer.getAddress();
         String endpoint = "http://" + bound.getHostString() + ":" + bound.getPort();
         Hashtable<String, Object> runtimeProps = new Hashtable<>();
-        runtimeProps.put(JdkHttpWhiteboardConstants.JDK_HTTP_ENDPOINT, new String[]{endpoint});
+        runtimeProps.put(JdkHttpServerRuntimeConstants.JDK_HTTP_ENDPOINT, new String[]{endpoint});
 
         JdkHttpServerRuntimeImpl runtime = new JdkHttpServerRuntimeImpl(this);
         runtimeRegistration = context.registerService(
@@ -170,6 +206,7 @@ public class JdkHttpServerWhiteboard {
         handlerTracker.open();
         filterTracker.open();
         authenticatorTracker.open();
+        resourceTracker.open();
     }
 
     /**
@@ -185,6 +222,9 @@ public class JdkHttpServerWhiteboard {
         }
         if (authenticatorTracker != null) {
             authenticatorTracker.close();
+        }
+        if (resourceTracker != null) {
+            resourceTracker.close();
         }
         ServiceRegistration<JdkHttpServerRuntime> reg = runtimeRegistration;
         if (reg != null) {
@@ -257,6 +297,100 @@ public class JdkHttpServerWhiteboard {
         }
     }
 
+    public ResourceDTO[] getResourceDTOs() {
+        synchronized (resourceLock) {
+            return refToResourceDTO.values().toArray(new ResourceDTO[0]);
+        }
+    }
+
+    public FailedResourceDTO[] getFailedResourceDTOs() {
+        synchronized (resourceLock) {
+            return refToFailedResourceDTO.values().toArray(new FailedResourceDTO[0]);
+        }
+    }
+
+    /**
+     * Calculates how a request to the given path would be processed: the
+     * handler or resource context whose path is the longest matching prefix,
+     * together with the filters and authenticator applied to that context.
+     */
+    public RequestInfoDTO calculateRequestInfoDTO(String path) {
+        RequestInfoDTO dto = new RequestInfoDTO();
+        dto.path = path;
+
+        String bestHandlerPath = null;
+        HandlerDTO matchedHandler = null;
+        synchronized (handlerLock) {
+            for (HandlerDTO h : refToHandlerDTO.values()) {
+                if (matchesPrefix(h.contextPath, path)
+                        && (bestHandlerPath == null || h.contextPath.length() > bestHandlerPath.length())) {
+                    bestHandlerPath = h.contextPath;
+                    matchedHandler = h;
+                }
+            }
+        }
+
+        String bestResourcePath = null;
+        ResourceDTO matchedResource = null;
+        synchronized (resourceLock) {
+            for (ResourceDTO r : refToResourceDTO.values()) {
+                for (String pattern : r.patterns) {
+                    if (matchesPrefix(pattern, path)
+                            && (bestResourcePath == null || pattern.length() > bestResourcePath.length())) {
+                        bestResourcePath = pattern;
+                        matchedResource = r;
+                    }
+                }
+            }
+        }
+
+        String matchedContextPath;
+        if (bestResourcePath != null
+                && (bestHandlerPath == null || bestResourcePath.length() > bestHandlerPath.length())) {
+            dto.resourceDTO = matchedResource;
+            matchedContextPath = bestResourcePath;
+        } else if (bestHandlerPath != null) {
+            dto.handlerDTO = matchedHandler;
+            matchedContextPath = bestHandlerPath;
+        } else {
+            matchedContextPath = null;
+        }
+
+        List<FilterDTO> matchedFilters = new ArrayList<>();
+        if (matchedContextPath != null) {
+            synchronized (filterLock) {
+                for (Map.Entry<ServiceReference<Filter>, FilterEntry> e : filterEntries.entrySet()) {
+                    if (e.getValue().matchesPath(matchedContextPath)) {
+                        matchedFilters.add(refToFilterDTO.get(e.getKey()));
+                    }
+                }
+            }
+            synchronized (authLock) {
+                for (Map.Entry<ServiceReference<Authenticator>, AuthenticatorEntry> e : authEntries.entrySet()) {
+                    if (e.getValue().matchesPath(matchedContextPath)) {
+                        dto.authenticatorDTO = refToAuthDTO.get(e.getKey());
+                        break;
+                    }
+                }
+            }
+        }
+        dto.filterDTOs = matchedFilters.toArray(new FilterDTO[0]);
+
+        return dto;
+    }
+
+    /**
+     * Returns {@code true} if {@code requestPath} is served by a context
+     * registered at {@code contextPath} (i.e. {@code contextPath} is
+     * {@code "/"}, an exact match, or a proper path prefix of the request).
+     */
+    private static boolean matchesPrefix(String contextPath, String requestPath) {
+        if ("/".equals(contextPath)) {
+            return true;
+        }
+        return requestPath.equals(contextPath) || requestPath.startsWith(contextPath + "/");
+    }
+
     // -----------------------------------------------------------------------
     // Handler tracker customizer
     // -----------------------------------------------------------------------
@@ -302,7 +436,7 @@ public class JdkHttpServerWhiteboard {
             FailedHandlerDTO dto = new FailedHandlerDTO();
             dto.serviceId = serviceId(ref);
             dto.contextPath = contextPath;
-            dto.failureReason = FailedHandlerDTO.FAILURE_REASON_INVALID_CONTEXT_PATH;
+            dto.failureReason = DTOConstants.FAILURE_REASON_VALIDATION_FAILED;
             refToFailedHandlerDTO.put(ref, dto);
             return;
         }
@@ -328,7 +462,7 @@ public class JdkHttpServerWhiteboard {
             dto.serviceId = serviceId(ref);
             dto.contextPath = contextPath;
             dto.contextName = (String) ref.getProperty(JdkHttpWhiteboardConstants.JDK_HTTP_CONTEXT_NAME);
-            dto.failureReason = FailedHandlerDTO.FAILURE_REASON_SHADOWED_BY_OTHER_HANDLER;
+            dto.failureReason = DTOConstants.FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE;
             refToFailedHandlerDTO.put(ref, dto);
         }
     }
@@ -362,7 +496,7 @@ public class JdkHttpServerWhiteboard {
             FailedHandlerDTO dto = new FailedHandlerDTO();
             dto.serviceId = serviceId(ref);
             dto.contextPath = contextPath;
-            dto.failureReason = FailedHandlerDTO.FAILURE_REASON_EXCEPTION_ON_INIT;
+            dto.failureReason = DTOConstants.FAILURE_REASON_EXCEPTION_ON_INIT;
             refToFailedHandlerDTO.put(ref, dto);
         }
     }
@@ -383,7 +517,7 @@ public class JdkHttpServerWhiteboard {
         dto.serviceId = old != null ? old.serviceId : serviceId(ref);
         dto.contextPath = contextPath;
         dto.contextName = old != null ? old.contextName : null;
-        dto.failureReason = FailedHandlerDTO.FAILURE_REASON_SHADOWED_BY_OTHER_HANDLER;
+        dto.failureReason = DTOConstants.FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE;
         refToFailedHandlerDTO.put(ref, dto);
     }
 
@@ -433,6 +567,191 @@ public class JdkHttpServerWhiteboard {
     }
 
     // -----------------------------------------------------------------------
+    // Resource tracker customizer
+    // -----------------------------------------------------------------------
+
+    private ServiceTrackerCustomizer<Object, ServiceReference<Object>> resourceCustomizer() {
+        return new ServiceTrackerCustomizer<>() {
+            @Override
+            public ServiceReference<Object> addingService(ServiceReference<Object> ref) {
+                onResourceAdded(ref);
+                return ref;
+            }
+
+            @Override
+            public void modifiedService(ServiceReference<Object> ref,
+                                        ServiceReference<Object> tracked) {
+                synchronized (resourceLock) {
+                    onResourceRemovedLocked(ref);
+                    onResourceAddedLocked(ref);
+                }
+            }
+
+            @Override
+            public void removedService(ServiceReference<Object> ref,
+                                       ServiceReference<Object> tracked) {
+                synchronized (resourceLock) {
+                    onResourceRemovedLocked(ref);
+                }
+            }
+        };
+    }
+
+    private void onResourceAdded(ServiceReference<Object> ref) {
+        synchronized (resourceLock) {
+            onResourceAddedLocked(ref);
+        }
+    }
+
+    private void onResourceAddedLocked(ServiceReference<Object> ref) {
+        String[] patterns = extractPatterns(
+                ref.getProperty(JdkHttpWhiteboardConstants.JDK_HTTP_RESOURCE_PATTERN));
+        String prefix = (String) ref.getProperty(JdkHttpWhiteboardConstants.JDK_HTTP_RESOURCE_PREFIX);
+
+        boolean validPatterns = patterns != null && patterns.length > 0
+                && Arrays.stream(patterns).allMatch(p -> p != null && p.startsWith("/"));
+        boolean validPrefix = prefix != null && ("/".equals(prefix) || !prefix.endsWith("/"));
+
+        if (!validPatterns || !validPrefix) {
+            FailedResourceDTO dto = new FailedResourceDTO();
+            dto.serviceId = serviceId(ref);
+            dto.patterns = patterns != null ? patterns : new String[0];
+            dto.prefix = prefix;
+            dto.failureReason = DTOConstants.FAILURE_REASON_VALIDATION_FAILED;
+            refToFailedResourceDTO.put(ref, dto);
+            return;
+        }
+
+        // Simple first-registered-wins collision check against both handler
+        // context paths and other resource patterns (no ranking-based
+        // shadow/promote logic, to keep this whiteboard lightweight).
+        for (String pattern : patterns) {
+            if (pathToRefs.containsKey(pattern) || resourcePathToRef.containsKey(pattern)) {
+                FailedResourceDTO dto = new FailedResourceDTO();
+                dto.serviceId = serviceId(ref);
+                dto.patterns = patterns;
+                dto.prefix = prefix;
+                dto.failureReason = DTOConstants.FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE;
+                refToFailedResourceDTO.put(ref, dto);
+                return;
+            }
+        }
+
+        Object service = context.getService(ref);
+        if (service == null) {
+            FailedResourceDTO dto = new FailedResourceDTO();
+            dto.serviceId = serviceId(ref);
+            dto.patterns = patterns;
+            dto.prefix = prefix;
+            dto.failureReason = DTOConstants.FAILURE_REASON_SERVICE_NOT_GETTABLE;
+            refToFailedResourceDTO.put(ref, dto);
+            return;
+        }
+
+        Bundle bundle = ref.getBundle();
+        HttpHandler resourceHandler = createResourceHandler(bundle, prefix);
+        List<HttpContext> contexts = new ArrayList<>();
+        try {
+            for (String pattern : patterns) {
+                HttpContext httpContext = httpServer.createContext(pattern, resourceHandler);
+                contexts.add(httpContext);
+                applyFiltersToContext(httpContext, pattern);
+                applyAuthenticatorToContext(httpContext, pattern);
+            }
+        } catch (Exception e) {
+            for (HttpContext httpContext : contexts) {
+                try {
+                    httpServer.removeContext(httpContext);
+                } catch (Exception ignored) {
+                }
+            }
+            context.ungetService(ref);
+            FailedResourceDTO dto = new FailedResourceDTO();
+            dto.serviceId = serviceId(ref);
+            dto.patterns = patterns;
+            dto.prefix = prefix;
+            dto.failureReason = DTOConstants.FAILURE_REASON_EXCEPTION_ON_INIT;
+            refToFailedResourceDTO.put(ref, dto);
+            return;
+        }
+
+        for (String pattern : patterns) {
+            resourcePathToRef.put(pattern, ref);
+        }
+        refToResourceContexts.put(ref, contexts);
+
+        ResourceDTO dto = new ResourceDTO();
+        dto.serviceId = serviceId(ref);
+        dto.patterns = patterns;
+        dto.prefix = prefix;
+        refToResourceDTO.put(ref, dto);
+    }
+
+    private void onResourceRemovedLocked(ServiceReference<Object> ref) {
+        refToFailedResourceDTO.remove(ref);
+        ResourceDTO removed = refToResourceDTO.remove(ref);
+
+        List<HttpContext> contexts = refToResourceContexts.remove(ref);
+        if (contexts != null) {
+            for (HttpContext httpContext : contexts) {
+                try {
+                    httpServer.removeContext(httpContext);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        if (removed != null) {
+            for (String pattern : removed.patterns) {
+                resourcePathToRef.remove(pattern, ref);
+            }
+            context.ungetService(ref);
+        }
+    }
+
+    /**
+     * Creates an {@link HttpHandler} that serves entries from the given
+     * bundle below {@code prefix}, defaulting an empty/{@code "/"} relative
+     * path to {@code index.html} and responding {@code 404} when no matching
+     * entry exists.
+     */
+    private static HttpHandler createResourceHandler(Bundle bundle, String prefix) {
+        return exchange -> {
+            String requestPath = exchange.getRequestURI().getPath();
+            String contextPath = exchange.getHttpContext().getPath();
+            String relative = requestPath.substring(contextPath.length());
+            if (relative.isEmpty() || "/".equals(relative)) {
+                relative = "/index.html";
+            }
+            if (!relative.startsWith("/")) {
+                relative = "/" + relative;
+            }
+
+            java.net.URL entry = bundle.getEntry(prefix + relative);
+            if (entry == null) {
+                byte[] body = "Not Found".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(404, body.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(body);
+                }
+                return;
+            }
+
+            String contentType = URLConnection.guessContentTypeFromName(entry.getPath());
+            exchange.getResponseHeaders().set("Content-Type",
+                    contentType != null ? contentType : "application/octet-stream");
+
+            try (InputStream in = entry.openStream()) {
+                byte[] body = in.readAllBytes();
+                exchange.sendResponseHeaders(200, body.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(body);
+                }
+            }
+        };
+    }
+
+    // -----------------------------------------------------------------------
     // Filter tracker customizer
     // -----------------------------------------------------------------------
 
@@ -467,7 +786,7 @@ public class JdkHttpServerWhiteboard {
             synchronized (filterLock) {
                 FailedFilterDTO dto = new FailedFilterDTO();
                 dto.serviceId = serviceId(ref);
-                dto.failureReason = FailedHandlerDTO.FAILURE_REASON_INVALID_CONTEXT_PATH;
+                dto.failureReason = DTOConstants.FAILURE_REASON_VALIDATION_FAILED;
                 refToFailedFilterDTO.put(ref, dto);
             }
             return;
@@ -558,7 +877,7 @@ public class JdkHttpServerWhiteboard {
             synchronized (authLock) {
                 FailedAuthenticatorDTO dto = new FailedAuthenticatorDTO();
                 dto.serviceId = serviceId(ref);
-                dto.failureReason = FailedHandlerDTO.FAILURE_REASON_INVALID_CONTEXT_PATH;
+                dto.failureReason = DTOConstants.FAILURE_REASON_VALIDATION_FAILED;
                 refToFailedAuthDTO.put(ref, dto);
             }
             return;

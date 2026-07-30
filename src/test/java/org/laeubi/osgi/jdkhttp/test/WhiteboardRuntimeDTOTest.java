@@ -5,7 +5,7 @@ import com.sun.net.httpserver.HttpHandler;
 import org.junit.jupiter.api.Test;
 import org.osgi.framework.ServiceReference;
 import org.osgi.service.jdkhttp.runtime.JdkHttpServerRuntime;
-import org.osgi.service.jdkhttp.runtime.dto.FailedHandlerDTO;
+import org.osgi.service.jdkhttp.runtime.dto.DTOConstants;
 import org.osgi.service.jdkhttp.runtime.dto.JdkHttpServerRuntimeDTO;
 import org.osgi.service.jdkhttp.whiteboard.JdkHttpWhiteboardConstants;
 
@@ -104,7 +104,7 @@ class WhiteboardRuntimeDTOTest extends AbstractWhiteboardTest {
         JdkHttpServerRuntimeDTO dto = getRuntimeDTO();
         assertEquals(0, dto.handlers.length);
         assertEquals(1, dto.failedHandlers.length);
-        assertEquals(FailedHandlerDTO.FAILURE_REASON_INVALID_CONTEXT_PATH,
+        assertEquals(DTOConstants.FAILURE_REASON_VALIDATION_FAILED,
                 dto.failedHandlers[0].failureReason);
     }
 
@@ -126,7 +126,7 @@ class WhiteboardRuntimeDTOTest extends AbstractWhiteboardTest {
         assertEquals("/shadow", dto.handlers[0].contextPath);
 
         assertEquals(1, dto.failedHandlers.length);
-        assertEquals(FailedHandlerDTO.FAILURE_REASON_SHADOWED_BY_OTHER_HANDLER,
+        assertEquals(DTOConstants.FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE,
                 dto.failedHandlers[0].failureReason);
     }
 

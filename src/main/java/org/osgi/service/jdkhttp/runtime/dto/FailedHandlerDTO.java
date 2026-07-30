@@ -1,36 +1,40 @@
+/*******************************************************************************
+ * Copyright (c) Contributors to the Eclipse Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0 
+ *******************************************************************************/
+
 package org.osgi.service.jdkhttp.runtime.dto;
 
 /**
- * Represents a {@code HttpHandler} service that failed to register.
+ * Represents a {@code com.sun.net.httpserver.HttpHandler} service which is
+ * currently not being used due to a problem.
+ *
+ * @NotThreadSafe
+ * @author $Id$
  */
 public class FailedHandlerDTO extends HandlerDTO {
 
-    /**
-     * The reason the handler failed to register.
-     *
-     * @see #FAILURE_REASON_UNKNOWN
-     * @see #FAILURE_REASON_INVALID_CONTEXT_PATH
-     * @see #FAILURE_REASON_SHADOWED_BY_OTHER_HANDLER
-     * @see #FAILURE_REASON_EXCEPTION_ON_INIT
-     */
-    public int failureReason;
-
-    /** The failure reason is unknown. */
-    public static final int FAILURE_REASON_UNKNOWN = 0;
-
-    /**
-     * The handler did not provide a valid
-     * {@link org.osgi.service.jdkhttp.whiteboard.JdkHttpWhiteboardConstants#JDK_HTTP_CONTEXT_PATH}
-     * property.
-     */
-    public static final int FAILURE_REASON_INVALID_CONTEXT_PATH = 1;
-
-    /**
-     * Another handler with a higher {@code service.ranking} is already
-     * registered at the same context path.
-     */
-    public static final int FAILURE_REASON_SHADOWED_BY_OTHER_HANDLER = 2;
-
-    /** An exception occurred while initialising the handler context. */
-    public static final int FAILURE_REASON_EXCEPTION_ON_INIT = 3;
+	/**
+	 * The reason why the handler represented by this DTO is not used.
+	 *
+	 * @see DTOConstants#FAILURE_REASON_UNKNOWN
+	 * @see DTOConstants#FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE
+	 * @see DTOConstants#FAILURE_REASON_EXCEPTION_ON_INIT
+	 * @see DTOConstants#FAILURE_REASON_SERVICE_NOT_GETTABLE
+	 * @see DTOConstants#FAILURE_REASON_VALIDATION_FAILED
+	 */
+	public int	failureReason;
 }

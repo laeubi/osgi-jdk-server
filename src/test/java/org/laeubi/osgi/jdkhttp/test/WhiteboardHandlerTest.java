@@ -92,7 +92,7 @@ class WhiteboardHandlerTest extends AbstractWhiteboardTest {
         var failed = whiteboard.getFailedHandlerDTOs();
         assertEquals(1, failed.length);
         assertEquals(
-                org.osgi.service.jdkhttp.runtime.dto.FailedHandlerDTO.FAILURE_REASON_INVALID_CONTEXT_PATH,
+                org.osgi.service.jdkhttp.runtime.dto.DTOConstants.FAILURE_REASON_VALIDATION_FAILED,
                 failed[0].failureReason);
     }
 
@@ -116,7 +116,7 @@ class WhiteboardHandlerTest extends AbstractWhiteboardTest {
         var failed = whiteboard.getFailedHandlerDTOs();
         assertEquals(1, failed.length);
         assertEquals(
-                org.osgi.service.jdkhttp.runtime.dto.FailedHandlerDTO.FAILURE_REASON_SHADOWED_BY_OTHER_HANDLER,
+                org.osgi.service.jdkhttp.runtime.dto.DTOConstants.FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE,
                 failed[0].failureReason);
     }
 

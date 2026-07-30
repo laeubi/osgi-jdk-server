@@ -18,23 +18,30 @@
 
 package org.osgi.service.jdkhttp.runtime.dto;
 
+import org.osgi.dto.DTO;
+
 /**
- * Represents a {@code com.sun.net.httpserver.Authenticator} service which is
- * currently not being used due to a problem.
+ * Represents the state of an active bundle resource registration.
  *
  * @NotThreadSafe
  * @author $Id$
  */
-public class FailedAuthenticatorDTO extends AuthenticatorDTO {
+public class ResourceDTO extends DTO {
 
 	/**
-	 * The reason why the authenticator represented by this DTO is not used.
-	 *
-	 * @see DTOConstants#FAILURE_REASON_UNKNOWN
-	 * @see DTOConstants#FAILURE_REASON_SHADOWED_BY_OTHER_SERVICE
-	 * @see DTOConstants#FAILURE_REASON_EXCEPTION_ON_INIT
-	 * @see DTOConstants#FAILURE_REASON_SERVICE_NOT_GETTABLE
-	 * @see DTOConstants#FAILURE_REASON_VALIDATION_FAILED
+	 * The service id of the resource service. This value is never negative.
 	 */
-	public int	failureReason;
+	public long		serviceId;
+
+	/**
+	 * The context path patterns at which the resources are served. This
+	 * value is never {@code null} and never empty.
+	 */
+	public String[]	patterns;
+
+	/**
+	 * The bundle entry prefix from which the resources are served. This
+	 * value is never {@code null}.
+	 */
+	public String	prefix;
 }
