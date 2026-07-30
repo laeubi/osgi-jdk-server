@@ -330,25 +330,31 @@ public class JdkHttpServerWhiteboard {
             }
         }
 
-        String bestResourcePath = null;
+        // Resource patterns use the "*" / "/*" / exact matching rules (see
+        // matchesAny), so the "best" (most specific) match is determined by
+        // the length of the derived, wildcard-free base context path rather
+        // than the raw pattern string.
+        String bestResourceBasePath = null;
         ResourceDTO matchedResource = null;
         synchronized (resourceLock) {
             for (ResourceDTO r : refToResourceDTO.values()) {
                 for (String pattern : r.patterns) {
-                    if (matchesPrefix(pattern, path)
-                            && (bestResourcePath == null || pattern.length() > bestResourcePath.length())) {
-                        bestResourcePath = pattern;
-                        matchedResource = r;
+                    if (matchesAny(new String[] { pattern }, path)) {
+                        String base = httpServerContextPath(pattern);
+                        if (bestResourceBasePath == null || base.length() > bestResourceBasePath.length()) {
+                            bestResourceBasePath = base;
+                            matchedResource = r;
+                        }
                     }
                 }
             }
         }
 
         String matchedContextPath;
-        if (bestResourcePath != null
-                && (bestHandlerPath == null || bestResourcePath.length() > bestHandlerPath.length())) {
+        if (bestResourceBasePath != null
+                && (bestHandlerPath == null || bestResourceBasePath.length() > bestHandlerPath.length())) {
             dto.resourceDTO = matchedResource;
-            matchedContextPath = bestResourcePath;
+            matchedContextPath = bestResourceBasePath;
         } else if (bestHandlerPath != null) {
             dto.handlerDTO = matchedHandler;
             matchedContextPath = bestHandlerPath;
@@ -359,18 +365,14 @@ public class JdkHttpServerWhiteboard {
         List<FilterDTO> matchedFilters = new ArrayList<>();
         if (matchedContextPath != null) {
             synchronized (filterLock) {
-                for (Map.Entry<ServiceReference<Filter>, FilterEntry> e : filterEntries.entrySet()) {
-                    if (e.getValue().matchesPath(matchedContextPath)) {
-                        matchedFilters.add(refToFilterDTO.get(e.getKey()));
-                    }
+                for (ServiceReference<Filter> ref : orderedMatchingFilterRefs(matchedContextPath)) {
+                    matchedFilters.add(refToFilterDTO.get(ref));
                 }
             }
             synchronized (authLock) {
-                for (Map.Entry<ServiceReference<Authenticator>, AuthenticatorEntry> e : authEntries.entrySet()) {
-                    if (e.getValue().matchesPath(matchedContextPath)) {
-                        dto.authenticatorDTO = refToAuthDTO.get(e.getKey());
-                        break;
-                    }
+                ServiceReference<Authenticator> best = bestMatchingAuthenticatorRef(matchedContextPath);
+                if (best != null) {
+                    dto.authenticatorDTO = refToAuthDTO.get(best);
                 }
             }
         }
@@ -481,8 +483,8 @@ public class JdkHttpServerWhiteboard {
             refToHandlerDTO.put(ref, dto);
 
             // Apply any already-registered filters and authenticators.
-            applyFiltersToContext(httpContext, contextPath);
-            applyAuthenticatorToContext(httpContext, contextPath);
+            applyFiltersToContext(contextPath, httpContext);
+            applyAuthenticatorToContext(contextPath, httpContext);
 
         } catch (Exception e) {
             // Context creation failed.
@@ -609,7 +611,7 @@ public class JdkHttpServerWhiteboard {
         String prefix = (String) ref.getProperty(JdkHttpWhiteboardConstants.JDK_HTTP_RESOURCE_PREFIX);
 
         boolean validPatterns = patterns != null && patterns.length > 0
-                && Arrays.stream(patterns).allMatch(p -> p != null && p.startsWith("/"));
+                && Arrays.stream(patterns).allMatch(JdkHttpServerWhiteboard::isValidPattern);
         boolean validPrefix = prefix != null && ("/".equals(prefix) || !prefix.endsWith("/"));
 
         if (!validPatterns || !validPrefix) {
@@ -624,9 +626,12 @@ public class JdkHttpServerWhiteboard {
 
         // Simple first-registered-wins collision check against both handler
         // context paths and other resource patterns (no ranking-based
-        // shadow/promote logic, to keep this whiteboard lightweight).
+        // shadow/promote logic, to keep this whiteboard lightweight). The
+        // check is performed against the base HttpServer context path each
+        // pattern resolves to (see httpServerContextPath(String)).
         for (String pattern : patterns) {
-            if (pathToRefs.containsKey(pattern) || resourcePathToRef.containsKey(pattern)) {
+            String base = httpServerContextPath(pattern);
+            if (pathToRefs.containsKey(base) || resourcePathToRef.containsKey(base)) {
                 FailedResourceDTO dto = new FailedResourceDTO();
                 dto.serviceId = serviceId(ref);
                 dto.patterns = patterns;
@@ -649,14 +654,15 @@ public class JdkHttpServerWhiteboard {
         }
 
         Bundle bundle = ref.getBundle();
-        HttpHandler resourceHandler = createResourceHandler(bundle, prefix);
         List<HttpContext> contexts = new ArrayList<>();
         try {
             for (String pattern : patterns) {
-                HttpContext httpContext = httpServer.createContext(pattern, resourceHandler);
+                String base = httpServerContextPath(pattern);
+                HttpHandler resourceHandler = createResourceHandler(bundle, prefix, pattern);
+                HttpContext httpContext = httpServer.createContext(base, resourceHandler);
                 contexts.add(httpContext);
-                applyFiltersToContext(httpContext, pattern);
-                applyAuthenticatorToContext(httpContext, pattern);
+                applyFiltersToContext(base, httpContext);
+                applyAuthenticatorToContext(base, httpContext);
             }
         } catch (Exception e) {
             for (HttpContext httpContext : contexts) {
@@ -676,7 +682,7 @@ public class JdkHttpServerWhiteboard {
         }
 
         for (String pattern : patterns) {
-            resourcePathToRef.put(pattern, ref);
+            resourcePathToRef.put(httpServerContextPath(pattern), ref);
         }
         refToResourceContexts.put(ref, contexts);
 
@@ -703,10 +709,38 @@ public class JdkHttpServerWhiteboard {
 
         if (removed != null) {
             for (String pattern : removed.patterns) {
-                resourcePathToRef.remove(pattern, ref);
+                resourcePathToRef.remove(httpServerContextPath(pattern), ref);
             }
             context.ungetService(ref);
         }
+    }
+
+    /**
+     * Returns {@code true} if {@code pattern} is a syntactically valid
+     * whiteboard pattern: {@code "*"}, a path ending with {@code "/*"}, or a
+     * path starting with {@code "/"}.
+     */
+    private static boolean isValidPattern(String pattern) {
+        return pattern != null && ("*".equals(pattern) || pattern.startsWith("/"));
+    }
+
+    /**
+     * Derives the literal {@link HttpServer} context path a whiteboard
+     * pattern resolves to, since the JDK {@code HttpServer} itself has no
+     * notion of the {@code "*"} / {@code "/*"} wildcard syntax defined for
+     * Filter, Authenticator, and Resource patterns: it always routes a
+     * request to the most specific registered context path that is a prefix
+     * of the request path.
+     */
+    private static String httpServerContextPath(String pattern) {
+        if ("*".equals(pattern)) {
+            return "/";
+        }
+        if (pattern.endsWith("/*")) {
+            String base = pattern.substring(0, pattern.length() - 2);
+            return base.isEmpty() ? "/" : base;
+        }
+        return pattern;
     }
 
     /**
@@ -714,26 +748,32 @@ public class JdkHttpServerWhiteboard {
      * bundle below {@code prefix}, defaulting an empty/{@code "/"} relative
      * path to {@code index.html} and responding {@code 404} when no matching
      * entry exists.
+     *
+     * <p>
+     * Because the underlying {@link HttpServer} always routes on the literal
+     * context path derived by {@link #httpServerContextPath(String)}, an
+     * exact (non-wildcard) {@code pattern} must be re-checked here: the JDK
+     * HttpServer would otherwise also route deeper sub-paths to this
+     * handler.
+     * </p>
      */
-    private static HttpHandler createResourceHandler(Bundle bundle, String prefix) {
+    private static HttpHandler createResourceHandler(Bundle bundle, String prefix, String pattern) {
         return exchange -> {
             String requestPath = exchange.getRequestURI().getPath();
-            String contextPath = exchange.getHttpContext().getPath();
-            String relative = requestPath.substring(contextPath.length());
+            String relative = relativeResourcePath(pattern, requestPath);
+            if (relative == null) {
+                sendPlainText(exchange, 404, "Not Found");
+                return;
+            }
             if (relative.isEmpty() || "/".equals(relative)) {
                 relative = "/index.html";
-            }
-            if (!relative.startsWith("/")) {
+            } else if (!relative.startsWith("/")) {
                 relative = "/" + relative;
             }
 
             java.net.URL entry = bundle.getEntry(prefix + relative);
             if (entry == null) {
-                byte[] body = "Not Found".getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(404, body.length);
-                try (OutputStream os = exchange.getResponseBody()) {
-                    os.write(body);
-                }
+                sendPlainText(exchange, 404, "Not Found");
                 return;
             }
 
@@ -749,6 +789,38 @@ public class JdkHttpServerWhiteboard {
                 }
             }
         };
+    }
+
+    /**
+     * Returns the part of {@code requestPath} below the whiteboard
+     * {@code pattern}'s match point, following the {@code "*"}/{@code "/*"}
+     * /exact pattern rules, or {@code null} if {@code requestPath} does not
+     * actually satisfy {@code pattern}.
+     */
+    private static String relativeResourcePath(String pattern, String requestPath) {
+        if ("*".equals(pattern)) {
+            return requestPath;
+        }
+        if (pattern.endsWith("/*")) {
+            String base = pattern.substring(0, pattern.length() - 2);
+            if (requestPath.equals(base)) {
+                return "";
+            }
+            if (requestPath.startsWith(base + "/")) {
+                return requestPath.substring(base.length());
+            }
+            return null;
+        }
+        return requestPath.equals(pattern) ? "" : null;
+    }
+
+    private static void sendPlainText(com.sun.net.httpserver.HttpExchange exchange, int status, String body)
+            throws IOException {
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -809,16 +881,7 @@ public class JdkHttpServerWhiteboard {
             refToFilterDTO.put(ref, dto);
         }
 
-        // Add the filter to all matching active contexts.
-        synchronized (handlerLock) {
-            for (Map.Entry<ServiceReference<HttpHandler>, HttpContext> e : refToContext.entrySet()) {
-                String path = refToHandlerDTO.containsKey(e.getKey())
-                        ? refToHandlerDTO.get(e.getKey()).contextPath : null;
-                if (path != null && entry.matchesPath(path)) {
-                    e.getValue().getFilters().add(filter);
-                }
-            }
-        }
+        recomputeFiltersForAllContexts();
     }
 
     private void onFilterRemoved(ServiceReference<Filter> ref) {
@@ -833,12 +896,7 @@ public class JdkHttpServerWhiteboard {
             return;
         }
 
-        // Remove the filter from all active contexts.
-        synchronized (handlerLock) {
-            for (Map.Entry<ServiceReference<HttpHandler>, HttpContext> e : refToContext.entrySet()) {
-                e.getValue().getFilters().remove(entry.filter());
-            }
-        }
+        recomputeFiltersForAllContexts();
         context.ungetService(ref);
     }
 
@@ -900,16 +958,7 @@ public class JdkHttpServerWhiteboard {
             refToAuthDTO.put(ref, dto);
         }
 
-        // Apply the authenticator to all matching active contexts.
-        synchronized (handlerLock) {
-            for (Map.Entry<ServiceReference<HttpHandler>, HttpContext> e : refToContext.entrySet()) {
-                String path = refToHandlerDTO.containsKey(e.getKey())
-                        ? refToHandlerDTO.get(e.getKey()).contextPath : null;
-                if (path != null && entry.matchesPath(path)) {
-                    e.getValue().setAuthenticator(auth);
-                }
-            }
-        }
+        recomputeAuthenticatorForAllContexts();
     }
 
     private void onAuthRemoved(ServiceReference<Authenticator> ref) {
@@ -924,16 +973,7 @@ public class JdkHttpServerWhiteboard {
             return;
         }
 
-        // Remove the authenticator from all active contexts it was applied to.
-        synchronized (handlerLock) {
-            for (Map.Entry<ServiceReference<HttpHandler>, HttpContext> e : refToContext.entrySet()) {
-                String path = refToHandlerDTO.containsKey(e.getKey())
-                        ? refToHandlerDTO.get(e.getKey()).contextPath : null;
-                if (path != null && entry.matchesPath(path)) {
-                    e.getValue().setAuthenticator(null);
-                }
-            }
-        }
+        recomputeAuthenticatorForAllContexts();
         context.ungetService(ref);
     }
 
@@ -941,26 +981,113 @@ public class JdkHttpServerWhiteboard {
     // Helpers
     // -----------------------------------------------------------------------
 
-    /** Apply all registered filters to a newly created context. */
-    private void applyFiltersToContext(HttpContext httpContext, String contextPath) {
-        synchronized (filterLock) {
-            for (FilterEntry fe : filterEntries.values()) {
-                if (fe.matchesPath(contextPath)) {
-                    httpContext.getFilters().add(fe.filter());
+    /**
+     * Invokes {@code action} once for every currently active
+     * {@link HttpContext} together with the wildcard-free base context path
+     * it was created at: handler contexts use their literal
+     * {@code contextPath}; resource contexts use the base path derived from
+     * their (possibly wildcard) pattern via {@link #httpServerContextPath}.
+     */
+    private void forEachActiveContext(java.util.function.BiConsumer<String, HttpContext> action) {
+        synchronized (handlerLock) {
+            for (Map.Entry<ServiceReference<HttpHandler>, HttpContext> e : refToContext.entrySet()) {
+                HandlerDTO dto = refToHandlerDTO.get(e.getKey());
+                if (dto != null) {
+                    action.accept(dto.contextPath, e.getValue());
+                }
+            }
+        }
+        synchronized (resourceLock) {
+            for (Map.Entry<ServiceReference<Object>, List<HttpContext>> e : refToResourceContexts.entrySet()) {
+                ResourceDTO dto = refToResourceDTO.get(e.getKey());
+                if (dto == null) {
+                    continue;
+                }
+                List<HttpContext> contexts = e.getValue();
+                for (int i = 0; i < dto.patterns.length && i < contexts.size(); i++) {
+                    action.accept(httpServerContextPath(dto.patterns[i]), contexts.get(i));
                 }
             }
         }
     }
 
-    /** Apply the first matching authenticator to a newly created context. */
-    private void applyAuthenticatorToContext(HttpContext httpContext, String contextPath) {
-        synchronized (authLock) {
-            for (AuthenticatorEntry ae : authEntries.values()) {
-                if (ae.matchesPath(contextPath)) {
-                    httpContext.setAuthenticator(ae.authenticator());
-                    break; // Only one authenticator per context.
+    /** Recomputes the ranking-ordered filter list of every active context. */
+    private void recomputeFiltersForAllContexts() {
+        forEachActiveContext(this::applyFiltersToContext);
+    }
+
+    /** Re-selects the best-matching authenticator for every active context. */
+    private void recomputeAuthenticatorForAllContexts() {
+        forEachActiveContext(this::applyAuthenticatorToContext);
+    }
+
+    /**
+     * Returns, in the order they must be invoked (decreasing service
+     * ranking, then ascending {@code service.id}), the references of the
+     * filters that match {@code contextPath}.
+     */
+    private List<ServiceReference<Filter>> orderedMatchingFilterRefs(String contextPath) {
+        synchronized (filterLock) {
+            List<ServiceReference<Filter>> matching = new ArrayList<>();
+            for (Map.Entry<ServiceReference<Filter>, FilterEntry> e : filterEntries.entrySet()) {
+                if (e.getValue().matchesPath(contextPath)) {
+                    matching.add(e.getKey());
                 }
             }
+            matching.sort(RANKING_COMPARATOR);
+            return matching;
+        }
+    }
+
+    /**
+     * Returns the reference of the authenticator that must be selected for
+     * {@code contextPath}: the matching authenticator with the highest
+     * service ranking, using the lowest {@code service.id} as a tie-break;
+     * or {@code null} if none match.
+     */
+    private ServiceReference<Authenticator> bestMatchingAuthenticatorRef(String contextPath) {
+        synchronized (authLock) {
+            ServiceReference<Authenticator> best = null;
+            for (Map.Entry<ServiceReference<Authenticator>, AuthenticatorEntry> e : authEntries.entrySet()) {
+                if (e.getValue().matchesPath(contextPath)
+                        && (best == null || RANKING_COMPARATOR.compare(e.getKey(), best) < 0)) {
+                    best = e.getKey();
+                }
+            }
+            return best;
+        }
+    }
+
+    /**
+     * (Re)computes the ranking-ordered set of filters that must be applied
+     * to {@code httpContext} (registered at {@code contextPath}) and
+     * replaces its current filter list with that computed list, so that
+     * filters are always invoked in order of decreasing service ranking
+     * (ascending {@code service.id} to break ties), per the specification.
+     */
+    private void applyFiltersToContext(String contextPath, HttpContext httpContext) {
+        List<Filter> ordered = new ArrayList<>();
+        synchronized (filterLock) {
+            for (ServiceReference<Filter> ref : orderedMatchingFilterRefs(contextPath)) {
+                ordered.add(filterEntries.get(ref).filter());
+            }
+        }
+        List<Filter> current = httpContext.getFilters();
+        current.clear();
+        current.addAll(ordered);
+    }
+
+    /**
+     * (Re)selects the single best-matching authenticator for
+     * {@code httpContext} (registered at {@code contextPath}), per the
+     * specification's "highest ranking, lowest service.id tie-break"
+     * selection rule, replacing whatever authenticator was previously set
+     * (including clearing it to {@code null} if none match any more).
+     */
+    private void applyAuthenticatorToContext(String contextPath, HttpContext httpContext) {
+        ServiceReference<Authenticator> best = bestMatchingAuthenticatorRef(contextPath);
+        synchronized (authLock) {
+            httpContext.setAuthenticator(best != null ? authEntries.get(best).authenticator() : null);
         }
     }
 

@@ -150,4 +150,58 @@ class WhiteboardFilterTest extends AbstractWhiteboardTest {
         assertEquals(1, dtos.length);
         assertEquals("myFilter", dtos[0].filterName);
     }
+
+    /**
+     * A filter that appends {@code value} to the (repeatable) {@code X-Order}
+     * response header, so tests can verify the exact invocation order of
+     * multiple filters applied to the same context.
+     */
+    private static Filter orderFilter(String value) {
+        return new Filter() {
+            @Override
+            public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+                exchange.getResponseHeaders().add("X-Order", value);
+                chain.doFilter(exchange);
+            }
+
+            @Override
+            public String description() {
+                return "Test order filter";
+            }
+        };
+    }
+
+    private static Dictionary<String, Object> filterPropsWithRanking(int ranking, String... patterns) {
+        Dictionary<String, Object> props = filterProps(patterns);
+        props.put(org.osgi.framework.Constants.SERVICE_RANKING, ranking);
+        return props;
+    }
+
+    @Test
+    void filtersAreInvokedInDecreasingRankingOrder() throws Exception {
+        context.registerService(HttpHandler.class, echoHandler(), handlerProps("/ranked"));
+        // Register out of ranking order to make sure sorting (not
+        // registration order) determines invocation order.
+        context.registerService(Filter.class, orderFilter("low"), filterPropsWithRanking(0, "/ranked"));
+        context.registerService(Filter.class, orderFilter("high"), filterPropsWithRanking(10, "/ranked"));
+        context.registerService(Filter.class, orderFilter("mid"), filterPropsWithRanking(5, "/ranked"));
+
+        HttpResponse<String> response = get("/ranked");
+
+        assertEquals(java.util.List.of("high", "mid", "low"), response.headers().allValues("X-Order"));
+    }
+
+    @Test
+    void equalRankingFiltersAreInvokedInAscendingServiceIdOrder() throws Exception {
+        context.registerService(HttpHandler.class, echoHandler(), handlerProps("/tie"));
+        // Same ranking (default 0): registration order determines service.id
+        // order, and thus invocation order, per the ascending-service.id
+        // tie-break rule.
+        context.registerService(Filter.class, orderFilter("first"), filterProps("/tie"));
+        context.registerService(Filter.class, orderFilter("second"), filterProps("/tie"));
+
+        HttpResponse<String> response = get("/tie");
+
+        assertEquals(java.util.List.of("first", "second"), response.headers().allValues("X-Order"));
+    }
 }

@@ -91,7 +91,7 @@ class WhiteboardResourceTest extends AbstractWhiteboardTest {
 
     @Test
     void resourceServesExistingBundleEntry() throws Exception {
-        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res", "/webroot"));
+        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res/*", "/webroot"));
 
         HttpResponse<String> response = get("/res/hello.txt");
 
@@ -101,7 +101,7 @@ class WhiteboardResourceTest extends AbstractWhiteboardTest {
 
     @Test
     void resourceDefaultsToIndexHtml() throws Exception {
-        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res", "/webroot"));
+        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res/*", "/webroot"));
 
         HttpResponse<String> response = get("/res/");
 
@@ -111,7 +111,7 @@ class WhiteboardResourceTest extends AbstractWhiteboardTest {
 
     @Test
     void resourceRespondsNotFoundForMissingEntry() throws Exception {
-        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res", "/webroot"));
+        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res/*", "/webroot"));
 
         HttpResponse<String> response = get("/res/does-not-exist.txt");
 
@@ -131,9 +131,30 @@ class WhiteboardResourceTest extends AbstractWhiteboardTest {
     }
 
     @Test
+    void resourceWithExactPatternOnlyMatchesThatPath() throws Exception {
+        // An exact (non-wildcard) pattern only maps the request path exactly
+        // matching it (relative path empty -> index.html); deeper sub-paths
+        // must not be served, per the shared Pattern Matching rules.
+        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res", "/webroot"));
+
+        assertEquals(200, get("/res").statusCode());
+        assertEquals("<html>Index</html>", get("/res").body());
+        assertEquals(404, get("/res/hello.txt").statusCode());
+    }
+
+    @Test
+    void resourceWithCatchAllPatternServesEverything() throws Exception {
+        // The "*" pattern matches every context path.
+        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("*", "/webroot"));
+
+        assertEquals(200, get("/hello.txt").statusCode());
+        assertEquals("Hello Resource!", get("/hello.txt").body());
+    }
+
+    @Test
     void resourceIsRemovedAfterServiceUnregistration() throws Exception {
         ServiceRegistration<Object> reg = resourceBundleContext().registerService(
-                Object.class, new Object(), resourceProps("/res", "/webroot"));
+                Object.class, new Object(), resourceProps("/res/*", "/webroot"));
 
         assertEquals(200, get("/res/hello.txt").statusCode());
 
@@ -145,7 +166,7 @@ class WhiteboardResourceTest extends AbstractWhiteboardTest {
 
     @Test
     void calculateRequestInfoDTOMatchesResource() {
-        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res", "/webroot"));
+        resourceBundleContext().registerService(Object.class, new Object(), resourceProps("/res/*", "/webroot"));
 
         RequestInfoDTO info = whiteboard.calculateRequestInfoDTO("/res/hello.txt");
 
@@ -154,7 +175,7 @@ class WhiteboardResourceTest extends AbstractWhiteboardTest {
         assertNull(info.handlerDTO);
         ResourceDTO resourceDTO = info.resourceDTO;
         assertEquals("/webroot", resourceDTO.prefix);
-        assertTrue(java.util.Arrays.asList(resourceDTO.patterns).contains("/res"));
+        assertTrue(java.util.Arrays.asList(resourceDTO.patterns).contains("/res/*"));
     }
 
     @Test
