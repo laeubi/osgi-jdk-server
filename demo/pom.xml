@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.laeubi</groupId>
+        <artifactId>osgi-jdk-server-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>osgi-jdk-server-demo</artifactId>
+    <packaging>jar</packaging>
+
+    <name>OSGi JDK HttpServer Whiteboard (Demo)</name>
+    <description>Demo module showcasing use-cases of the OSGi JDK HttpServer Whiteboard Specification</description>
+
+    <dependencies>
+        <!-- runtime module providing the whiteboard specification and implementation -->
+        <dependency>
+            <groupId>org.laeubi</groupId>
+            <artifactId>osgi-jdk-server</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- OSGi Core API (spec interfaces and ServiceTracker) -->
+        <dependency>
+            <groupId>org.osgi</groupId>
+            <artifactId>osgi.core</artifactId>
+            <version>8.0.0</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Declarative Services component property type annotations -->
+        <dependency>
+            <groupId>org.osgi</groupId>
+            <artifactId>org.osgi.service.component.annotations</artifactId>
+            <version>1.5.1</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+</project>
