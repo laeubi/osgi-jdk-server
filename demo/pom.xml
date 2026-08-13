@@ -39,5 +39,83 @@
             <version>1.5.1</version>
             <scope>provided</scope>
         </dependency>
+
+        <!-- Declarative Services runtime API, used for ComponentConstants
+             (matches org.apache.felix.hc.core.impl.servlet.ResultHtmlSerializer) -->
+        <dependency>
+            <groupId>org.osgi</groupId>
+            <artifactId>org.osgi.service.component</artifactId>
+            <version>1.5.1</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- OSGi metatype annotations, used for the @ObjectClassDefinition
+             configuration descriptions of the health check demo -->
+        <dependency>
+            <groupId>org.osgi</groupId>
+            <artifactId>org.osgi.service.metatype.annotations</artifactId>
+            <version>1.4.1</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Apache Felix Health Check API - the health-check-jdk demo
+             re-exposes the existing HealthCheckExecutor service (and its
+             Result / HealthCheckExecutionResult DTOs) via a JDK HttpServer
+             HttpHandler instead of the original Servlet -->
+        <dependency>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>org.apache.felix.healthcheck.api</artifactId>
+            <version>2.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Used for JSONWriter, matching the original org.apache.felix.hc.core.impl.servlet.ResultJsonSerializer -->
+        <dependency>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>org.apache.felix.utils</artifactId>
+            <version>1.11.8</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- SLF4J API used for logging, as in the original Felix Health Check servlet -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.13</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Apache Felix OSGi framework - used in tests as embedded runtime -->
+        <dependency>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>org.apache.felix.framework</artifactId>
+            <version>7.0.5</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Apache Felix Health Check Executor implementation - used in tests
+             to run the demo end-to-end against a real HealthCheckExecutor -->
+        <dependency>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>org.apache.felix.healthcheck.core</artifactId>
+            <version>2.3.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- JUnit 5 -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Simple slf4j binding so log output is visible during tests -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.13</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>
